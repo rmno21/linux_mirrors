@@ -41,10 +41,6 @@ The script will:
     ```bash
     sudo ./IranMirrors.sh
     ```
-    Alternatively, you can pass the `--restore` flag to revert to your previous configuration:
-    ```bash
-    sudo ./IranMirrors.sh --restore
-    ```
 
 ## 📋 How It Works
 
