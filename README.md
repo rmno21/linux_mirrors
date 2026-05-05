@@ -75,6 +75,3 @@ This project is licensed under the **GNU General Public License v3.0**. See the 
 #InternetShutdown #IranInternetShutdown #DigitalBlackoutIran #IranDigitalBlackout #Whitelisted_Line #IRanASignalProxy #SOSIran
 
 
-```bash
-sudo bash <(curl -s https://raw.githubusercontent.com/RMNO21/Linux_Mirrors/main/IranMirrors.sh)
-```
