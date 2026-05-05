@@ -42,11 +42,19 @@ The script will:
 
 ## 📋 How It Works
 
-1.  **Backup**: Your current sources (e.g., `/etc/apt/sources.list` or `/etc/pacman.d/mirrorlist`) are backed up to `/var/backups/mirrorgpt/`.
-2.  **Testing**: The script sends a lightweight HTTP probe to each mirror and measures response time.
-3.  **Selection**: The four mirrors with the lowest latency and highest reliability are selected.
-4.  **Update**: Your system’s source list is replaced with the new mirrors.
-5.  **Finalize**: Run `apt update`, `yum update`, or `pacman -Syy` to refresh your package database.
+1. Detection: Identifies your OS, version, and codename from /etc/os-release.
+
+2. Backup: Your current sources are backed up to /var/backups/mirrorgpt/ with a timestamp.
+
+3. Probing: Each mirror is tested with a release-specific HTTP probe (e.g., dists/noble/Release for Ubuntu 24.04) to verify it carries your distribution.
+
+4. Scoring: Mirrors are ranked by ping latency (fallback: curl response time).
+
+5. Selection: The top 2 fastest mirrors that pass HTTP checks are selected.
+
+6. Configuration: Source files are rewritten using the appropriate format for your OS.
+
+7. Cleanup: Old conflicting source files are disabled, not deleted.
 
 ## 🗺️ Included Mirrors
 
