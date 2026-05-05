@@ -2,6 +2,19 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# mirrorgpt.sh
+# Purpose:
+#  - Backup current repo config
+#  - Restore from last backup
+#  - Switch to best mirrors (official first, then Iranian mirrors) based on OS detection + latency + HTTP checks
+#
+# Notes:
+#  - No external YAML tools required
+#  - Uses curl; uses ping if available; falls back to curl timing
+#  - Designed to be safe: writes backups, uses atomic-ish file operations where practical
+
+# ----------------------------- utilities -----------------------------
+
 RED=$'\033[0;31m'
 GRN=$'\033[0;32m'
 YLW=$'\033[0;33m'
@@ -19,9 +32,12 @@ need_cmd() {
 }
 
 is_root() { [[ "${EUID:-$(id -u)}" -eq 0 ]]; }
+
 ts_now() { date +"%Y%m%d-%H%M%S"; }
+
 mkdirp() { mkdir -p "$1"; }
 
+# curl wrapper: returns http code, also collects total time
 curl_http_code() {
   local url="$1"
   curl -fsS -o /dev/null --max-time 6 -w "%{http_code}" "$url" 2>/dev/null || echo "000"
@@ -29,6 +45,7 @@ curl_http_code() {
 
 curl_time_total_ms() {
   local url="$1"
+  # time_total in seconds (float). Convert to ms.
   local t
   t="$(curl -fsS -o /dev/null --max-time 6 -w "%{time_total}" "$url" 2>/dev/null || echo "99.999")"
   awk -v t="$t" 'BEGIN{ printf "%.0f", (t*1000) }'
@@ -37,6 +54,7 @@ curl_time_total_ms() {
 ping_ms() {
   local host="$1"
   if command -v ping >/dev/null 2>&1; then
+    # Linux ping output typically: time=12.3 ms
     local out
     out="$(ping -c 1 -W 1 "$host" 2>/dev/null || true)"
     awk 'match($0,/time=([0-9.]+)[ ]*ms/,a){print a[1]}' <<<"$out" | head -n1 | awk '{printf "%.0f",$1}' || true
@@ -51,12 +69,15 @@ host_from_url() {
   printf "%s" "$url"
 }
 
+# score: lower is better
+# Uses ping if available; else uses curl time.
+# Also requires HTTP check to pass for a given probe path.
 score_mirror() {
   local base="$1"
-  local probe="$2"
-  local expect="$3"
-
+  local probe="$2"     # full probe path appended to base, may be ""
+  local expect="$3"    # "any" or "ok" (ok=200/301/302) or "docker"(200/401)
   local url
+
   if [[ -n "$probe" ]]; then
     url="${base%/}/${probe#/}"
   else
@@ -77,6 +98,9 @@ score_mirror() {
     any)
       [[ "$code" != "000" ]] && pass=1
       ;;
+    *)
+      pass=0
+      ;;
   esac
 
   if [[ "$pass" -ne 1 ]]; then
@@ -89,48 +113,31 @@ score_mirror() {
   pms="$(ping_ms "$host" || true)"
 
   if [[ -n "${pms:-}" ]]; then
+    # ping-based score
     printf "%s %s %s\n" "$pms" "$code" "$url"
   else
     tms="$(curl_time_total_ms "$url")"
+    # add small penalty because curl timing includes TLS/HTTP but is less stable than ping
     printf "%s %s %s\n" "$((tms+25))" "$code" "$url"
   fi
 }
 
-progress_bar() {
-  local current="$1"
-  local total="$2"
-  local width=40
-  local percent=$(( current * 100 / total ))
-  local filled=$(( current * width / total ))
-  local empty=$(( width - filled ))
-  {
-    printf "\r[WORK] Testing mirrors: %3d%% [" "$percent"
-    printf '%*s' "$filled" '' | tr ' ' '#'
-    printf '%*s' "$empty" ''  | tr ' ' '.'
-    printf "]"
-  } >&2
-}
-
 choose_best_mirrors() {
+  # Inputs:
+  #  - array of "name|base|probe|expect"
+  # Outputs:
+  #  - prints best base URLs (one per line) sorted by score; limited by BEST_N
   local -n _arr="$1"
   local BEST_N="${2:-4}"
 
-  local total="${#_arr[@]}"
-  local idx=0
-
   local scored=()
   local item name base probe expect
-
   for item in "${_arr[@]}"; do
-    idx=$((idx+1))
-    progress_bar "$idx" "$total"
     IFS='|' read -r name base probe expect <<<"$item"
     local s code url
     read -r s code url < <(score_mirror "$base" "$probe" "$expect")
     scored+=("${s}|${name}|${base}|${code}|${url}")
   done
-
-  printf "\r[WORK] Testing mirrors: 100%% [########################################]\n" >&2
 
   printf "%s\n" "${scored[@]}" \
     | sort -t'|' -k1,1n \
@@ -138,11 +145,12 @@ choose_best_mirrors() {
     | awk -F'|' '{print $3}'
 }
 
+# ----------------------------- OS detection -----------------------------
+
 OS_ID=""
 OS_LIKE=""
 OS_NAME=""
 OS_VERSION_ID=""
-
 detect_os() {
   if [[ -r /etc/os-release ]]; then
     # shellcheck disable=SC1091
@@ -152,9 +160,10 @@ detect_os() {
     OS_NAME="${NAME:-}"
     OS_VERSION_ID="${VERSION_ID:-}"
   else
-    err "/etc/os-release not found."
+    err "/etc/os-release not found. Unsupported system."
     exit 1
   fi
+
   info "Detected OS: ${OS_NAME:-unknown} (ID=${OS_ID:-?}, VERSION_ID=${OS_VERSION_ID:-?})"
 }
 
@@ -169,6 +178,8 @@ is_rhel_family() {
 is_arch_family() {
   [[ "$OS_ID" == "arch" || "$OS_ID" == "manjaro" || "$OS_LIKE" == *"arch"* ]]
 }
+
+# ----------------------------- backups -----------------------------
 
 BACKUP_DIR="/var/backups/mirrorgpt"
 BACKUP_META="${BACKUP_DIR}/LAST_BACKUP"
@@ -314,6 +325,10 @@ do_restore() {
   fi
 }
 
+# ----------------------------- mirror catalog -----------------------------
+# Format: "name|base_url|probe_path|expect"
+# Probes are lightweight and generic.
+
 MIRRORS_UBUNTU=(
   "Ubuntu Official Archive|https://archive.ubuntu.com/ubuntu|dists/|ok"
   "Ubuntu Official Security|https://security.ubuntu.com/ubuntu|dists/|ok"
@@ -361,25 +376,34 @@ MIRRORS_ARCH=(
   "0-1 Cloud Mirror|https://mirror.0-1.cloud/archlinux|core/os/x86_64/|ok"
   "Arvan Linux Repo|https://arvancloud.ir/dev/linux-repository/archlinux|core/os/x86_64/|ok"
   "Pardisco Mirror|https://pardisco.co/archlinux|core/os/x86_64/|ok"
+  "Liara Mirror (docs)|https://liara.ir| |any"
 )
 
-MIRRORS_RHEL_GENERIC=(
-  "ITO Repo Portal|https://repo-portal.ito.gov.ir| |any"
-  "Arvan Linux Repo|https://arvancloud.ir/dev/linux-repository| |any"
-  "IranServer Mirror|https://mirror.iranserver.com| |any"
-  "MobinHost Mirror|https://mirror.mobinhost.com| |any"
-  "0-1 Cloud Mirror|https://mirror.0-1.cloud| |any"
-  "AminiDC Mirror|https://mirror.aminidc.com| |any"
-  "IUT Mirror|https://repo.iut.ac.ir| |any"
-  "Abrha Mirror|https://abrha.net| |any"
-  "LinuxMirrors.ir|https://linuxmirrors.ir| |any"
-  "Pardisco Mirror|https://pardisco.co| |any"
+MIRRORS_ALPINE=(
+  "Alpine Official|https://dl-cdn.alpinelinux.org/alpine|v3.20/main/|ok"
+  "IUT Mirror|https://repo.iut.ac.ir/alpine|v3.20/main/|ok"
+  "MobinHost Mirror|https://mirror.mobinhost.com/alpine|v3.20/main/|ok"
+  "0-1 Cloud Mirror|https://mirror.0-1.cloud/alpine|v3.20/main/|ok"
+  "Arvan Linux Repo|https://arvancloud.ir/dev/linux-repository/alpine|v3.20/main/|ok"
+  "Pardisco Mirror|https://pardisco.co/alpine|v3.20/main/|ok"
+  "Liara Mirror (docs)|https://liara.ir| |any"
 )
+
+MIRRORS_DOCKER=(
+  "Docker Official Registry|https://registry-1.docker.io|v2/|docker"
+  "Hamdocker|https://hub.hamdocker.ir|v2/|docker"
+  "Mobinhost Docker|https://docker.mobinhost.com|v2/|docker"
+  "Arvan Docker|https://arvancloud.ir/fa/dev/docker|v2/|docker"
+  "Focker|https://focker.ir|v2/|docker"
+  "Docker Kernel IR|https://docker.kernel.ir|v2/|docker"
+)
+
+# ----------------------------- apply mirrors -----------------------------
 
 write_apt_sources_for_ubuntu_debian() {
   local primary="$1"
   local secondary="$2"
-  local codename
+  local distro codename
   codename="$(. /etc/os-release; echo "${VERSION_CODENAME:-}")"
   if [[ -z "${codename:-}" ]]; then
     err "VERSION_CODENAME not found in /etc/os-release."
@@ -389,7 +413,6 @@ write_apt_sources_for_ubuntu_debian() {
   local f="/etc/apt/sources.list"
   cp -a "$f" "${f}.mirrorgpt.bak.$(ts_now)" 2>/dev/null || true
 
-  info "Writing APT sources with selected mirrors..."
   cat >"$f" <<EOF
 # Generated by mirrorgpt.sh at $(date -Is)
 # Primary:   ${primary}
@@ -404,6 +427,7 @@ deb ${secondary%/} ${codename}-updates main restricted universe multiverse
 deb ${secondary%/} ${codename}-backports main restricted universe multiverse
 EOF
 
+  # Add security appropriately
   if [[ "$OS_ID" == "ubuntu" ]]; then
     cat >>"$f" <<EOF
 deb http://security.ubuntu.com/ubuntu ${codename}-security main restricted universe multiverse
@@ -414,8 +438,8 @@ deb https://security.debian.org/debian-security ${codename}-security main contri
 EOF
   fi
 
-  ok "Updated /etc/apt/sources.list"
-  info "Run: apt update"
+  ok "Wrote $f"
+  info "Next: apt update"
 }
 
 apply_arch_mirrorlist() {
@@ -424,24 +448,28 @@ apply_arch_mirrorlist() {
   local f="/etc/pacman.d/mirrorlist"
   cp -a "$f" "${f}.mirrorgpt.bak.$(ts_now)" 2>/dev/null || true
 
-  info "Writing pacman mirrorlist with selected mirrors..."
   cat >"$f" <<EOF
 # Generated by mirrorgpt.sh at $(date -Is)
+# Ranked mirrors (top first)
 Server = ${primary%/}/\$repo/os/\$arch
 Server = ${secondary%/}/\$repo/os/\$arch
 EOF
 
-  ok "Updated /etc/pacman.d/mirrorlist"
-  info "Run: pacman -Syy"
+  ok "Wrote $f"
+  info "Next: pacman -Syy"
 }
 
 apply_rhel_repo_hint() {
+  # RHEL-family repos vary by distro; we avoid overwriting user repos automatically.
+  # Instead we pick best mirror endpoints and print suggested .repo stanzas.
   local primary="$1"
   local secondary="$2"
+
   warn "Automatic YUM/DNF repo rewriting is not enabled (distro-specific)."
   info "Selected mirrors:"
   log "  Primary:   $primary"
   log "  Secondary: $secondary"
+  info "If your mirror provides CentOS/Rocky/Alma paths, create .repo entries accordingly."
 }
 
 switch_to_best_mirrors() {
@@ -452,10 +480,8 @@ switch_to_best_mirrors() {
     exit 1
   fi
 
-  info "Creating backup..."
+  info "Creating backup first..."
   do_backup
-
-  info "Scanning mirrors (this may take a little while)..."
 
   local best=()
   local primary="" secondary=""
@@ -472,9 +498,6 @@ switch_to_best_mirrors() {
       err "No working mirrors found."
       exit 1
     fi
-    info "Best mirrors found:"
-    printf "  1) %s\n" "$primary"
-    printf "  2) %s\n" "$secondary"
     write_apt_sources_for_ubuntu_debian "$primary" "$secondary"
     return 0
   fi
@@ -487,24 +510,31 @@ switch_to_best_mirrors() {
       err "No working mirrors found."
       exit 1
     fi
-    info "Best mirrors found:"
-    printf "  1) %s\n" "$primary"
-    printf "  2) %s\n" "$secondary"
     apply_arch_mirrorlist "$primary" "$secondary"
     return 0
   fi
 
   if is_rhel_family; then
-    mapfile -t best < <(choose_best_mirrors MIRRORS_RHEL_GENERIC 4)
+    # Use a generic set that likely exists via some portals; keep conservative.
+    local MIRRORS_RHEL=(
+      "ITO Repo Portal|https://repo-portal.ito.gov.ir| |any"
+      "Arvan Linux Repo|https://arvancloud.ir/dev/linux-repository| |any"
+      "IranServer Mirror|https://mirror.iranserver.com| |any"
+      "MobinHost Mirror|https://mirror.mobinhost.com| |any"
+      "0-1 Cloud Mirror|https://mirror.0-1.cloud| |any"
+      "AminiDC Mirror|https://mirror.aminidc.com| |any"
+      "IUT Mirror|https://repo.iut.ac.ir| |any"
+      "Abrha Mirror|https://abrha.net| |any"
+      "LinuxMirrors.ir|https://linuxmirrors.ir| |any"
+      "Pardisco Mirror|https://pardisco.co| |any"
+    )
+    mapfile -t best < <(choose_best_mirrors MIRRORS_RHEL 4)
     primary="${best[0]:-}"
     secondary="${best[1]:-${best[0]:-}}"
     if [[ -z "$primary" ]]; then
       err "No working mirrors found."
       exit 1
     fi
-    info "Best mirrors found:"
-    printf "  1) %s\n" "$primary"
-    printf "  2) %s\n" "$secondary"
     apply_rhel_repo_hint "$primary" "$secondary"
     return 0
   fi
@@ -513,6 +543,8 @@ switch_to_best_mirrors() {
   exit 1
 }
 
+# ----------------------------- menu -----------------------------
+
 menu() {
   cat <<'EOF'
 Select an action:
@@ -520,7 +552,7 @@ Select an action:
   2) Restore from last backup
   3) Switch mirrors (official first, then Iranian mirrors; auto-ranked)
 
-Enter a number (1-3):
+Enter a number (1-3): 
 EOF
 }
 
