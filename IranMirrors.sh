@@ -2,6 +2,7 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+
 # ----------------------------- utilities -----------------------------
 
 RED=$'\033[0;31m'
@@ -195,7 +196,7 @@ backup_debian() {
       cp -a /etc/apt/sources.list.d "$dest/"
     fi
     ok "Backed up APT config to: $dest"
-    ok "Scanning for best mirrors. This may take a while..."
+    ok "Scanning mirrors. This may take a while... "
   else
     warn "/etc/apt not found."
   fi
@@ -241,7 +242,7 @@ backup_rhel() {
   if [[ -d /etc/yum.repos.d ]]; then
     cp -a /etc/yum.repos.d "$dest/"
     ok "Backed up YUM/DNF repos to: $dest"
-    ok "Scanning for best mirrors. This may take a while..."
+    ok "Scanning mirrors. This may take a while... "
   else
     warn "/etc/yum.repos.d not found."
   fi
@@ -279,7 +280,7 @@ backup_arch() {
   if [[ -f /etc/pacman.d/mirrorlist ]]; then
     cp -a /etc/pacman.d/mirrorlist "$dest/"
     ok "Backed up pacman mirrorlist to: $dest"
-    ok "Scanning for best mirrors. This may take a while..."
+    ok "Scanning mirrors. This may take a while... "
   else
     warn "/etc/pacman.d/mirrorlist not found."
   fi
@@ -391,7 +392,6 @@ MIRRORS_ARCH=(
 
 # ----------------------------- apply mirrors -----------------------------
 
-# Writes sources in classic one-line format (Ubuntu < 24.04, Debian)
 write_apt_classic() {
   local primary="$1"
   local secondary="$2"
@@ -427,25 +427,26 @@ EOF
   info "Next: apt update"
 }
 
-# Writes sources in DEB822 format (Ubuntu >= 24.04)
 write_apt_deb822() {
   local primary="$1"
   local secondary="$2"
   local codename="$3"
   local f="/etc/apt/sources.list.d/mirrorgpt.sources"
 
-  # Remove old sources.list and rename default ubuntu.sources
+  # Disable old one-line style sources.list if present
   local old_list="/etc/apt/sources.list"
-  local default_deb822="/etc/apt/sources.list.d/ubuntu.sources"
-
   if [[ -f "$old_list" ]]; then
     mv "$old_list" "${old_list}.mirrorgpt.disabled.$(ts_now)" 2>/dev/null || true
   fi
+
+  # Move the default ubuntu.sources file out of sources.list.d to avoid apt warnings
+  local default_deb822="/etc/apt/sources.list.d/ubuntu.sources"
   if [[ -f "$default_deb822" ]]; then
-    mv "$default_deb822" "${default_deb822}.mirrorgpt.original.$(ts_now)" 2>/dev/null || true
+    mkdirp "$BACKUP_DIR"
+    mv "$default_deb822" "$BACKUP_DIR/ubuntu.sources.original-$(ts_now)" 2>/dev/null || true
   fi
 
-  # Determine security mirror: if security.ubuntu.com is reachable use it, else fallback to primary
+  # Determine if security mirror is reachable
   local security_url="http://security.ubuntu.com/ubuntu"
   local security_reachable=0
   if curl_http_code "${security_url}/dists/${codename}-security/Release" | grep -qE '^(200|301|302)'; then
@@ -523,6 +524,8 @@ switch_to_best_mirrors() {
 
   info "Creating backup first..."
   do_backup
+
+  info "Testing mirrors, this may take a while..."
 
   local best=()
   local primary="" secondary=""
