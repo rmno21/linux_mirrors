@@ -1,5 +1,3 @@
-
-
 # Linux Mirrors (IranMirrors.sh)
 
 A cross‑distribution, smart mirror manager designed for Linux users operating under Iran's internet blackout. It automatically tests and selects the fastest accessible local mirrors for your distribution, ensuring your system can be updated and maintained even when international access is severed.
