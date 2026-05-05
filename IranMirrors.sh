@@ -2,18 +2,6 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# mirrorgpt.sh
-# Purpose:
-#  - Backup current repo config
-#  - Restore from last backup
-#  - Switch to best mirrors (official first, then Iranian mirrors) based on OS detection + latency + HTTP checks
-#
-# Notes:
-#  - No external YAML tools required
-#  - Uses curl; uses ping if available; falls back to curl timing
-#  - Designed to be safe: writes backups, uses atomic-ish file operations where practical
-#  - On Ubuntu 24.04+ uses the native DEB822 source format
-
 # ----------------------------- utilities -----------------------------
 
 RED=$'\033[0;31m'
