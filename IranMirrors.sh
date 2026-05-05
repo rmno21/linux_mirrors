@@ -103,10 +103,12 @@ progress_bar() {
   local percent=$(( current * 100 / total ))
   local filled=$(( current * width / total ))
   local empty=$(( width - filled ))
-  printf "\r[WORK] Testing mirrors: %3d%% [" "$percent"
-  printf '%*s' "$filled" '' | tr ' ' '#'
-  printf '%*s' "$empty" ''  | tr ' ' '.'
-  printf "]"
+  {
+    printf "\r[WORK] Testing mirrors: %3d%% [" "$percent"
+    printf '%*s' "$filled" '' | tr ' ' '#'
+    printf '%*s' "$empty" ''  | tr ' ' '.'
+    printf "]"
+  } >&2
 }
 
 choose_best_mirrors() {
@@ -128,7 +130,7 @@ choose_best_mirrors() {
     scored+=("${s}|${name}|${base}|${code}|${url}")
   done
 
-  printf "\r[WORK] Testing mirrors: 100%% [########################################]\n"
+  printf "\r[WORK] Testing mirrors: 100%% [########################################]\n" >&2
 
   printf "%s\n" "${scored[@]}" \
     | sort -t'|' -k1,1n \
