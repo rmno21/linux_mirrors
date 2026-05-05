@@ -196,7 +196,6 @@ backup_debian() {
       cp -a /etc/apt/sources.list.d "$dest/"
     fi
     ok "Backed up APT config to: $dest"
-    ok "Scanning mirrors. This may take a while... "
   else
     warn "/etc/apt not found."
   fi
@@ -242,7 +241,7 @@ backup_rhel() {
   if [[ -d /etc/yum.repos.d ]]; then
     cp -a /etc/yum.repos.d "$dest/"
     ok "Backed up YUM/DNF repos to: $dest"
-    ok "Scanning mirrors. This may take a while... "
+
   else
     warn "/etc/yum.repos.d not found."
   fi
@@ -280,7 +279,7 @@ backup_arch() {
   if [[ -f /etc/pacman.d/mirrorlist ]]; then
     cp -a /etc/pacman.d/mirrorlist "$dest/"
     ok "Backed up pacman mirrorlist to: $dest"
-    ok "Scanning mirrors. This may take a while... "
+
   else
     warn "/etc/pacman.d/mirrorlist not found."
   fi
