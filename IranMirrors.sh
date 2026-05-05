@@ -12,6 +12,7 @@ IFS=$'\n\t'
 #  - No external YAML tools required
 #  - Uses curl; uses ping if available; falls back to curl timing
 #  - Designed to be safe: writes backups, uses atomic-ish file operations where practical
+#  - On Ubuntu 24.04+ uses the native DEB822 source format
 
 # ----------------------------- utilities -----------------------------
 
@@ -45,7 +46,6 @@ curl_http_code() {
 
 curl_time_total_ms() {
   local url="$1"
-  # time_total in seconds (float). Convert to ms.
   local t
   t="$(curl -fsS -o /dev/null --max-time 6 -w "%{time_total}" "$url" 2>/dev/null || echo "99.999")"
   awk -v t="$t" 'BEGIN{ printf "%.0f", (t*1000) }'
@@ -54,7 +54,6 @@ curl_time_total_ms() {
 ping_ms() {
   local host="$1"
   if command -v ping >/dev/null 2>&1; then
-    # Linux ping output typically: time=12.3 ms
     local out
     out="$(ping -c 1 -W 1 "$host" 2>/dev/null || true)"
     awk 'match($0,/time=([0-9.]+)[ ]*ms/,a){print a[1]}' <<<"$out" | head -n1 | awk '{printf "%.0f",$1}' || true
@@ -151,6 +150,9 @@ OS_ID=""
 OS_LIKE=""
 OS_NAME=""
 OS_VERSION_ID=""
+OS_VERSION_MAJOR=0
+VERSION_CODENAME=""
+
 detect_os() {
   if [[ -r /etc/os-release ]]; then
     # shellcheck disable=SC1091
@@ -159,11 +161,15 @@ detect_os() {
     OS_LIKE="${ID_LIKE:-}"
     OS_NAME="${NAME:-}"
     OS_VERSION_ID="${VERSION_ID:-}"
+    VERSION_CODENAME="${VERSION_CODENAME:-}"
+    OS_VERSION_MAJOR="${OS_VERSION_ID%%.*}"
   else
     err "/etc/os-release not found. Unsupported system."
     exit 1
   fi
-
+  if [[ -z "$OS_VERSION_MAJOR" ]]; then
+    OS_VERSION_MAJOR=0
+  fi
   info "Detected OS: ${OS_NAME:-unknown} (ID=${OS_ID:-?}, VERSION_ID=${OS_VERSION_ID:-?})"
 }
 
@@ -179,6 +185,11 @@ is_arch_family() {
   [[ "$OS_ID" == "arch" || "$OS_ID" == "manjaro" || "$OS_LIKE" == *"arch"* ]]
 }
 
+get_ubuntu_deb822() {
+  # Return 0 if this Ubuntu release uses the DEB822 source format by default (>= 24.04)
+  [[ "$OS_ID" == "ubuntu" && "$OS_VERSION_MAJOR" -ge 24 ]]
+}
+
 # ----------------------------- backups -----------------------------
 
 BACKUP_DIR="/var/backups/mirrorgpt"
@@ -192,9 +203,10 @@ backup_debian() {
 
   if [[ -d /etc/apt ]]; then
     cp -a /etc/apt/sources.list "$dest/" 2>/dev/null || true
-    cp -a /etc/apt/sources.list.d "$dest/" 2>/dev/null || true
+    if [[ -d /etc/apt/sources.list.d ]]; then
+      cp -a /etc/apt/sources.list.d "$dest/"
+    fi
     ok "Backed up APT config to: $dest"
-    ok "Testing Mirrors, this may take a while..."
   else
     warn "/etc/apt not found."
   fi
@@ -213,9 +225,15 @@ restore_debian() {
     exit 1
   fi
 
+  # Remove our custom file if present
+  rm -f /etc/apt/sources.list.d/mirrorgpt.sources 2>/dev/null || true
+
   if [[ -f "$src/sources.list" ]]; then
     cp -a "$src/sources.list" /etc/apt/sources.list
+  else
+    rm -f /etc/apt/sources.list 2>/dev/null || true
   fi
+
   if [[ -d "$src/sources.list.d" ]]; then
     rm -rf /etc/apt/sources.list.d
     cp -a "$src/sources.list.d" /etc/apt/
@@ -234,7 +252,6 @@ backup_rhel() {
   if [[ -d /etc/yum.repos.d ]]; then
     cp -a /etc/yum.repos.d "$dest/"
     ok "Backed up YUM/DNF repos to: $dest"
-    ok "Testing Mirrors, this may take a while..."
   else
     warn "/etc/yum.repos.d not found."
   fi
@@ -272,7 +289,6 @@ backup_arch() {
   if [[ -f /etc/pacman.d/mirrorlist ]]; then
     cp -a /etc/pacman.d/mirrorlist "$dest/"
     ok "Backed up pacman mirrorlist to: $dest"
-    ok "Testing Mirrors, this may take a while..."
   else
     warn "/etc/pacman.d/mirrorlist not found."
   fi
@@ -330,7 +346,7 @@ do_restore() {
 
 # ----------------------------- mirror catalog -----------------------------
 # Format: "name|base_url|probe_path|expect"
-# Probes are lightweight and generic.
+# Probes are lightweight. For distribution-specific probes they can be overridden later.
 
 MIRRORS_UBUNTU=(
   "Ubuntu Official Archive|https://archive.ubuntu.com/ubuntu|dists/|ok"
@@ -382,45 +398,21 @@ MIRRORS_ARCH=(
   "Liara Mirror (docs)|https://liara.ir| |any"
 )
 
-MIRRORS_ALPINE=(
-  "Alpine Official|https://dl-cdn.alpinelinux.org/alpine|v3.20/main/|ok"
-  "IUT Mirror|https://repo.iut.ac.ir/alpine|v3.20/main/|ok"
-  "MobinHost Mirror|https://mirror.mobinhost.com/alpine|v3.20/main/|ok"
-  "0-1 Cloud Mirror|https://mirror.0-1.cloud/alpine|v3.20/main/|ok"
-  "Arvan Linux Repo|https://arvancloud.ir/dev/linux-repository/alpine|v3.20/main/|ok"
-  "Pardisco Mirror|https://pardisco.co/alpine|v3.20/main/|ok"
-  "Liara Mirror (docs)|https://liara.ir| |any"
-)
-
-MIRRORS_DOCKER=(
-  "Docker Official Registry|https://registry-1.docker.io|v2/|docker"
-  "Hamdocker|https://hub.hamdocker.ir|v2/|docker"
-  "Mobinhost Docker|https://docker.mobinhost.com|v2/|docker"
-  "Arvan Docker|https://arvancloud.ir/fa/dev/docker|v2/|docker"
-  "Focker|https://focker.ir|v2/|docker"
-  "Docker Kernel IR|https://docker.kernel.ir|v2/|docker"
-)
-
 # ----------------------------- apply mirrors -----------------------------
 
-write_apt_sources_for_ubuntu_debian() {
+# Writes sources in classic one-line format (Ubuntu < 24.04, Debian)
+write_apt_classic() {
   local primary="$1"
   local secondary="$2"
-  local distro codename
-  codename="$(. /etc/os-release; echo "${VERSION_CODENAME:-}")"
-  if [[ -z "${codename:-}" ]]; then
-    err "VERSION_CODENAME not found in /etc/os-release."
-    exit 1
-  fi
-
+  local codename="$3"
   local f="/etc/apt/sources.list"
-  cp -a "$f" "${f}.mirrorgpt.bak.$(ts_now)" 2>/dev/null || true
+
+  if [[ -f "$f" ]]; then
+    cp -a "$f" "${f}.mirrorgpt.bak.$(ts_now)" 2>/dev/null || true
+  fi
 
   cat >"$f" <<EOF
 # Generated by mirrorgpt.sh at $(date -Is)
-# Primary:   ${primary}
-# Secondary: ${secondary}
-
 deb ${primary%/} ${codename} main restricted universe multiverse
 deb ${primary%/} ${codename}-updates main restricted universe multiverse
 deb ${primary%/} ${codename}-backports main restricted universe multiverse
@@ -430,7 +422,6 @@ deb ${secondary%/} ${codename}-updates main restricted universe multiverse
 deb ${secondary%/} ${codename}-backports main restricted universe multiverse
 EOF
 
-  # Add security appropriately
   if [[ "$OS_ID" == "ubuntu" ]]; then
     cat >>"$f" <<EOF
 deb http://security.ubuntu.com/ubuntu ${codename}-security main restricted universe multiverse
@@ -439,6 +430,64 @@ EOF
     cat >>"$f" <<EOF
 deb https://security.debian.org/debian-security ${codename}-security main contrib non-free non-free-firmware
 EOF
+  fi
+
+  ok "Wrote $f"
+  info "Next: apt update"
+}
+
+# Writes sources in DEB822 format (Ubuntu >= 24.04)
+write_apt_deb822() {
+  local primary="$1"
+  local secondary="$2"
+  local codename="$3"
+  local f="/etc/apt/sources.list.d/mirrorgpt.sources"
+
+  # Remove old sources.list and rename default ubuntu.sources
+  local old_list="/etc/apt/sources.list"
+  local default_deb822="/etc/apt/sources.list.d/ubuntu.sources"
+
+  if [[ -f "$old_list" ]]; then
+    mv "$old_list" "${old_list}.mirrorgpt.disabled.$(ts_now)" 2>/dev/null || true
+  fi
+  if [[ -f "$default_deb822" ]]; then
+    mv "$default_deb822" "${default_deb822}.mirrorgpt.original.$(ts_now)" 2>/dev/null || true
+  fi
+
+  # Determine security mirror: if security.ubuntu.com is reachable use it, else fallback to primary
+  local security_url="http://security.ubuntu.com/ubuntu"
+  local security_reachable=0
+  if curl_http_code "${security_url}/dists/${codename}-security/Release" | grep -qE '^(200|301|302)'; then
+    security_reachable=1
+  fi
+
+  cat >"$f" <<EOF
+# Generated by mirrorgpt.sh at $(date -Is)
+Types: deb
+URIs: ${primary%/}
+Suites: ${codename} ${codename}-updates ${codename}-backports
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: ${secondary%/}
+Suites: ${codename} ${codename}-updates ${codename}-backports
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+
+  if [[ "$security_reachable" -eq 1 ]]; then
+    cat >>"$f" <<EOF
+
+Types: deb
+URIs: ${security_url}
+Suites: ${codename}-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+EOF
+  else
+    warn "Official security mirror unreachable; security updates omitted."
+    warn "You may add a trusted local mirror for -security manually if needed."
   fi
 
   ok "Wrote $f"
@@ -463,8 +512,6 @@ EOF
 }
 
 apply_rhel_repo_hint() {
-  # RHEL-family repos vary by distro; we avoid overwriting user repos automatically.
-  # Instead we pick best mirror endpoints and print suggested .repo stanzas.
   local primary="$1"
   local secondary="$2"
 
@@ -490,18 +537,46 @@ switch_to_best_mirrors() {
   local primary="" secondary=""
 
   if is_debian_family; then
-    if [[ "$OS_ID" == "ubuntu" ]]; then
-      mapfile -t best < <(choose_best_mirrors MIRRORS_UBUNTU 4)
-    else
-      mapfile -t best < <(choose_best_mirrors MIRRORS_DEBIAN 4)
+    local codename="${VERSION_CODENAME:-}"
+    if [[ -z "$codename" ]]; then
+      err "Could not determine distribution codename."
+      exit 1
     fi
+
+    # Replace generic probe with release-specific probe so mirrors lacking the release fail
+    local -a mirrors_release
+    local base_array_name
+    local original_entry
+    if [[ "$OS_ID" == "ubuntu" ]]; then
+      base_array_name="MIRRORS_UBUNTU"
+    else
+      base_array_name="MIRRORS_DEBIAN"
+    fi
+
+    local -n base_mirrors="$base_array_name"
+    mirrors_release=()
+    for original_entry in "${base_mirrors[@]}"; do
+      IFS='|' read -r name base probe expect <<<"$original_entry"
+      # Only override probe if it is generic (exactly "dists/") to avoid breaking custom ones
+      if [[ "$probe" == "dists/" ]]; then
+        probe="dists/${codename}/Release"
+      fi
+      mirrors_release+=("${name}|${base}|${probe}|${expect}")
+    done
+
+    mapfile -t best < <(choose_best_mirrors mirrors_release 4)
     primary="${best[0]:-}"
     secondary="${best[1]:-${best[0]:-}}"
     if [[ -z "$primary" ]]; then
       err "No working mirrors found."
       exit 1
     fi
-    write_apt_sources_for_ubuntu_debian "$primary" "$secondary"
+
+    if [[ "$OS_ID" == "ubuntu" ]] && get_ubuntu_deb822; then
+      write_apt_deb822 "$primary" "$secondary" "$codename"
+    else
+      write_apt_classic "$primary" "$secondary" "$codename"
+    fi
     return 0
   fi
 
@@ -518,7 +593,6 @@ switch_to_best_mirrors() {
   fi
 
   if is_rhel_family; then
-    # Use a generic set that likely exists via some portals; keep conservative.
     local MIRRORS_RHEL=(
       "ITO Repo Portal|https://repo-portal.ito.gov.ir| |any"
       "Arvan Linux Repo|https://arvancloud.ir/dev/linux-repository| |any"
@@ -555,7 +629,7 @@ Select an action:
   2) Restore from last backup
   3) Switch mirrors (official first, then Iranian mirrors; auto-ranked)
 
-Enter a number (1-3): 
+Enter a number (1-3):
 EOF
 }
 
