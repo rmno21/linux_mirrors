@@ -16,7 +16,7 @@ A cross‑distribution, smart mirror manager designed for Linux users operating 
 **As `root` or with `sudo`**, copy and paste this command into your terminal:
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/RMNO21/Linux_Mirrors/main/IranMirrors.sh)
+curl -s -o /tmp/IranMirrors.sh https://raw.githubusercontent.com/RMNO21/Linux_Mirrors/main/IranMirrors.sh && sudo bash /tmp/IranMirrors.sh
 ```
 
 The script will:
